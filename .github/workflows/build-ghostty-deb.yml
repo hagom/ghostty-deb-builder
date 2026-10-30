@@ -4,6 +4,9 @@ on:
   schedule:
     # Se ejecuta automáticamente todos los días a las 06:00 y 18:00 UTC
     - cron: '0 6,18 * * *'
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
