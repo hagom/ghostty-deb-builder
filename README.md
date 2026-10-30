@@ -4,7 +4,7 @@ Este repositorio compila y empaqueta automáticamente [Ghostty](https://github.c
 
 ## 🚀 ¿Cómo funciona?
 
-1. **Automatizado**: Un pipeline de GitHub Actions se ejecuta 2 veces al día para consultar si `ghostty-org/ghostty` ha publicado un nuevo release o tag.
+1. **Automatizado**: Un pipeline de GitHub Actions se ejecuta 1 vez al día (06:00 UTC) para consultar si `ghostty-org/ghostty` ha publicado un nuevo release o tag.
 2. **Sin duplicados**: Si la versión ya fue empaquetada y publicada en este repositorio, el workflow finaliza en segundos sin gastar minutos de cómputo.
 3. **Entorno nativo**: Si hay una versión nueva, se compila dentro de un contenedor oficial `debian:forky` con todas las dependencias nativas (GTK 4, Libadwaita, GTK4 Layer Shell) y la versión exacta de Zig requerida por esa versión de Ghostty.
 4. **Releases listos**: El archivo `.deb` final se publica automáticamente en la pestaña [Releases](../../releases) de este repositorio.
