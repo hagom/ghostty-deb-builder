@@ -1,0 +1,173 @@
+name: Build Ghostty Debian Package
+
+on:
+  schedule:
+    # Se ejecuta automáticamente todos los días a las 06:00 y 18:00 UTC
+    - cron: '0 6,18 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag de Ghostty a compilar (ej: v1.4.0). Déjalo vacío para compilar el último release oficial.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    name: Verificar nuevo release
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Comprobar versión upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Determinar el tag objetivo
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TARGET_TAG="${{ github.event.inputs.tag }}"
+          else
+            TARGET_TAG=$(gh api repos/ghostty-org/ghostty/releases/latest --jq .tag_name)
+          fi
+
+          echo "Tag objetivo: $TARGET_TAG"
+          echo "tag=$TARGET_TAG" >> $GITHUB_OUTPUT
+
+          # 2. Comprobar si ya existe en nuestros Releases
+          if gh release view "$TARGET_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "El release $TARGET_TAG ya existe en este repositorio. Saltando build."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "Nueva versión detectada ($TARGET_TAG). Procediendo a compilar."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build-deb:
+    name: Compilar .deb en Debian Forky
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: debian:forky
+
+    steps:
+      - name: Instalar dependencias del sistema
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            jq \
+            git \
+            xz-utils \
+            build-essential \
+            dpkg-dev \
+            file \
+            gettext \
+            libxml2-utils \
+            blueprint-compiler \
+            pandoc \
+            libadwaita-1-dev \
+            libgtk-4-dev \
+            libgtk4-layer-shell-dev \
+            libonig-dev \
+            libbz2-dev
+
+      - name: Clonar Ghostty en el tag correspondiente
+        run: |
+          TAG="${{ needs.check-version.outputs.tag }}"
+          git clone --depth 1 --branch "$TAG" https://github.com/ghostty-org/ghostty.git ghostty-src
+
+      - name: Instalar versión requerida de Zig
+        run: |
+          cd ghostty-src
+          ZIG_VERSION=$(sed -n -E 's/^\s*\.?minimum_zig_version\s*=\s*"([^"]+)".*/\1/p' build.zig.zon)
+          ARCH=$(uname -m)
+          echo "Buscando Zig $ZIG_VERSION para ${ARCH}-linux..."
+
+          ZIG_URL=$(curl -s https://ziglang.org/download/index.json | jq -r --arg v "$ZIG_VERSION" --arg a "${ARCH}-linux" '.[$v][$a].tarball')
+          if [ -z "$ZIG_URL" ] || [ "$ZIG_URL" = "null" ]; then
+            echo "Versión exacta no encontrada en index.json, usando master..."
+            ZIG_URL=$(curl -s https://ziglang.org/download/index.json | jq -r --arg a "${ARCH}-linux" '.master[$a].tarball')
+          fi
+
+          echo "Descargando desde: $ZIG_URL"
+          curl -fsSL "$ZIG_URL" -o /tmp/zig.tar.xz
+          mkdir -p /opt/zig
+          tar -xf /tmp/zig.tar.xz -C /opt/zig --strip-components 1
+          ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Compilar Ghostty y empaquetar .deb
+        run: |
+          cd ghostty-src
+          RAW_TAG="${{ needs.check-version.outputs.tag }}"
+          VERSION="${RAW_TAG#v}" # Quita el prefijo 'v' si existe (ej. v1.4.0 -> 1.4.0)
+          ARCH="amd64"
+          STAGE_DIR="/tmp/ghostty-pkg"
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR/DEBIAN"
+
+          # 1. Compilar e instalar binario, accesos directos, iconos, manpages y terminfo
+          zig build \
+            -Doptimize=ReleaseFast \
+            -Dcpu=baseline \
+            --prefix "$STAGE_DIR/usr"
+
+          # 2. Calcular dependencias dinámicamente según librerías compartidas reales
+          cd "$STAGE_DIR"
+          SHLIBS=$(dpkg-shlibdeps -O usr/bin/ghostty 2>/dev/null | sed -e 's/shlibs:Depends=//')
+          if [ -z "$SHLIBS" ]; then
+            SHLIBS="libc6, libgtk-4-1, libadwaita-1-0, libgtk4-layer-shell0"
+          fi
+
+          # 3. Generar el archivo de control Debian
+          cat <<EOF > DEBIAN/control
+          Package: ghostty
+          Version: ${VERSION}
+          Section: x11
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: ${{ github.repository_owner }}
+          Depends: ${SHLIBS}
+          Description: Ghostty terminal emulator
+           Fast, feature-rich, GPU-accelerated terminal emulator written in Zig.
+          EOF
+
+          # 4. Construir el paquete .deb
+          mkdir -p /tmp/output
+          DEB_NAME="ghostty_${VERSION}_forky_${ARCH}.deb"
+          dpkg-deb --build --root-owner-group "$STAGE_DIR" "/tmp/output/${DEB_NAME}"
+
+      - name: Guardar paquete temporalmente
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostty-deb
+          path: /tmp/output/*.deb
+
+  publish-release:
+    name: Publicar GitHub Release
+    needs: [check-version, build-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar paquete .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: ghostty-deb
+          path: ./dist
+
+      - name: Crear Release y adjuntar .deb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.check-version.outputs.tag }}"
+          DEB_FILE=$(ls ./dist/*.deb)
+
+          gh release create "$TAG" "$DEB_FILE" \
+            --repo "${{ github.repository }}" \
+            --title "Ghostty $TAG (.deb Debian Forky)" \
+            --notes "Paquete .deb compilado automáticamente en Debian Forky para Ghostty $TAG."
