@@ -30,11 +30,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. Determinar el tag objetivo
+          # 1. Determinar el tag objetivo (buscamos en los tags oficiales de ghostty-org/ghostty)
           if [ -n "${{ github.event.inputs.tag }}" ]; then
             TARGET_TAG="${{ github.event.inputs.tag }}"
           else
-            TARGET_TAG=$(gh api repos/ghostty-org/ghostty/releases/latest --jq .tag_name)
+            TARGET_TAG=$(gh api repos/ghostty-org/ghostty/tags --jq '.[].name' | grep -E '^v[0-9]+' | head -n 1)
           fi
 
           echo "Tag objetivo: $TARGET_TAG"
